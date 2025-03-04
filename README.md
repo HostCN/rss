@@ -35,8 +35,8 @@
 ### 安装
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/rss/rss-telegram-bot.git
-   cd rss-telegram-bot
+   git clone https://github.com/your-username/your-repo-name.git
+   cd your-repo-name/rss
    ```
 
 2. 安装所需的库：
@@ -45,7 +45,7 @@
    ```
 
 3. 设置环境变量或直接在脚本中配置机器人token：
-   - 编辑脚本中的`TOKEN`或使用环境变量。
+   - 编辑`/rss/bot.py`中的`TOKEN`或使用环境变量。
 
 4. 初始化数据库：
    - 运行脚本一次以初始化数据库（会创建`subscriptions.db`）。
@@ -82,7 +82,7 @@
 ## 运行机器人
 运行机器人：
 ```bash
-python main.py
+python /rss/bot.py
 ```
 
 机器人将每20秒检查一次新帖子。如果需要，可以调整`check_latest_posts`任务的间隔。
@@ -94,4 +94,4 @@ python main.py
 本项目在MIT许可证下开源。详见LICENSE文件。
 ```
 
-**注意:** 将`https://github.com/your-username/rss-telegram-bot.git`替换为您在GitHub或其他平台上托管的实际仓库URL。根据您的项目设置调整任何其他具体细节。
+**注意:** 将`https://github.com/your-username/your-repo-name.git`替换为您在GitHub上托管的实际仓库URL。根据您的项目设置调整任何其他具体细节。
