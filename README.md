@@ -35,7 +35,7 @@
 ### 安装
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/your-username/rss-telegram-bot.git
+   git clone https://github.com/rss/rss-telegram-bot.git
    cd rss-telegram-bot
    ```
 
