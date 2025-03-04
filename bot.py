@@ -11,6 +11,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, Conversation
 from telegram.ext import filters
 from telegram.constants import ParseMode
 import aiohttp
+from telegram.error import BadRequest
 
 TOKEN = 'bot'
 AUTHORIZED_USERS = ['8111870448', '7554663120']
@@ -31,10 +32,10 @@ HEADERS = {
 lang_dict = {
     'en': {
         'welcome': 'Welcome to RSS Bot! Here are the available commands:',
-        'subscribe_prompt': 'Please send the RSS feed URL:',
+        'subscribe_prompt': 'Send RSS URL (or @ChannelName URL for channel subscription):',
         'unsubscribe_prompt': 'Select a feed to unsubscribe:',
         'no_subscription': 'No subscriptions yet.',
-        'subscribed': 'Subscribed to <a href="{0}">{0}</a>',
+        'subscribed': 'Subscribed to <a href="{0}">{0}</a>{1}',
         'unsubscribed': 'Unsubscribed from <a href="{0}">{0}</a>',
         'invalid_choice': 'Invalid choice.',
         'interval_set': 'Interval for <a href="{0}">{0}</a> set to <code>{1}</code> seconds.',
@@ -42,10 +43,10 @@ lang_dict = {
         'paused': 'Paused <a href="{0}">{0}</a>.',
         'resumed': 'Resumed <a href="{0}">{0}</a>.',
         'list_subscriptions': 'Your subscriptions:',
-        'status': '{0}. <a href="{1}">{1}</a> - <i>{2}</i> - Interval: <code>{3}</code>s - Filter: <code>{4}</code>',
+        'status': '{0}. <a href="{1}">{1}</a> - <i>{2}</i> - Interval: <code>{3}</code>s - Filter: <code>{4}</code> - Chat: {5}',
         'help': '<b>Available Commands:</b>\n'
                 '<b>/start</b> - Start the bot and show help\n'
-                '<b>/subscribe</b> - Add a new RSS feed\n'
+                '<b>/subscribe</b> - Add RSS feed (URL or @ChannelName URL)\n'
                 '<b>/unsubscribe</b> - Remove an RSS feed\n'
                 '<b>/list</b> - Show your subscriptions\n'
                 '<b>/set_interval URL interval</b> - Set check interval (seconds)\n'
@@ -53,7 +54,8 @@ lang_dict = {
                 '<b>/resume URL</b> - Resume a feed\n'
                 '<b>/set_filter URL keyword</b> - Filter feed content\n'
                 '<b>/set_preview on|off</b> - Toggle link preview\n'
-                '<b>/set_style 1|2|3</b> - Set message style\n'
+                '<b>/set_style 1|2|3|4|5</b> - Set message style\n'
+                '<b>/show_styles</b> - Show available message styles\n'
                 '<b>/feedback text</b> - Send feedback\n'
                 '<b>/get_latest [number]</b> - Get latest updates\n'
                 '<b>/help</b> - Show this help',
@@ -66,14 +68,15 @@ lang_dict = {
         'timeout': 'Subscription to <a href="{0}">{0}</a> timed out.',
         'empty_feed': 'The feed <a href="{0}">{0}</a> appears empty or could not be parsed correctly.',
         'preview_set': 'Link preview set to {0}',
-        'style_set': 'Message style set to Style {0}'
+        'style_set': 'Message style set to Style {0}',
+        'styles_preview': 'Available message styles:\n{0}'
     },
     'zh': {
         'welcome': '欢迎使用RSS机器人！以下是可用命令：',
-        'subscribe_prompt': '请发送RSS feed URL：',
+        'subscribe_prompt': '发送RSS URL（或@ChannelName URL用于频道订阅）：',
         'unsubscribe_prompt': '选择要取消订阅的feed：',
         'no_subscription': '你还没有订阅任何feed。',
-        'subscribed': '已订阅 <a href="{0}">{0}</a>',
+        'subscribed': '已订阅 <a href="{0}">{0}</a>{1}',
         'unsubscribed': '已取消订阅 <a href="{0}">{0}</a>',
         'invalid_choice': '无效选择。',
         'interval_set': '已将 <a href="{0}">{0}</a> 的间隔设置为 <code>{1}</code>秒。',
@@ -81,10 +84,10 @@ lang_dict = {
         'paused': '已暂停 <a href="{0}">{0}</a>。',
         'resumed': '已恢复 <a href="{0}">{0}</a>。',
         'list_subscriptions': '你的订阅列表：',
-        'status': '{0}. <a href="{1}">{1}</a> - <i>{2}</i> - 间隔：<code>{3}</code>秒 - 过滤：<code>{4}</code>',
+        'status': '{0}. <a href="{1}">{1}</a> - <i>{2}</i> - 间隔：<code>{3}</code>秒 - 过滤：<code>{4}</code> - 聊天：{5}',
         'help': '<b>可用命令：</b>\n'
                 '<b>/start</b> - 启动机器人并显示帮助\n'
-                '<b>/subscribe</b> - 添加RSS订阅\n'
+                '<b>/subscribe</b> - 添加RSS订阅（URL或@ChannelName URL）\n'
                 '<b>/unsubscribe</b> - 取消RSS订阅\n'
                 '<b>/list</b> - 查看订阅列表\n'
                 '<b>/set_interval URL 间隔</b> - 设置检查间隔（秒）\n'
@@ -92,7 +95,8 @@ lang_dict = {
                 '<b>/resume URL</b> - 恢复订阅\n'
                 '<b>/set_filter URL 关键词</b> - 过滤订阅内容\n'
                 '<b>/set_preview on|off</b> - 开关链接预览\n'
-                '<b>/set_style 1|2|3</b> - 设置消息样式\n'
+                '<b>/set_style 1|2|3|4|5</b> - 设置消息样式\n'
+                '<b>/show_styles</b> - 显示可用消息样式\n'
                 '<b>/feedback 反馈</b> - 发送反馈\n'
                 '<b>/get_latest [数量]</b> - 获取最新更新\n'
                 '<b>/help</b> - 显示此帮助',
@@ -105,7 +109,8 @@ lang_dict = {
         'timeout': '订阅 <a href="{0}">{0}</a> 超时。',
         'empty_feed': '该feed <a href="{0}">{0}</a> 看似为空或无法正确解析。',
         'preview_set': '链接预览设置为 {0}',
-        'style_set': '消息样式设置为样式 {0}'
+        'style_set': '消息样式设置为样式 {0}',
+        'styles_preview': '可用消息样式：\n{0}'
     }
 }
 
@@ -127,7 +132,8 @@ async def set_bot_commands(bot):
         BotCommand("resume", "Resume a feed"),
         BotCommand("set_filter", "Filter feed content"),
         BotCommand("set_preview", "Toggle link preview (on/off)"),
-        BotCommand("set_style", "Set message style (1-3)"),
+        BotCommand("set_style", "Set message style (1-5)"),
+        BotCommand("show_styles", "Show available message styles"),
         BotCommand("feedback", "Send feedback"),
         BotCommand("get_latest", "Get latest updates"),
         BotCommand("help", "Show this help")
@@ -142,7 +148,8 @@ async def set_bot_commands(bot):
         BotCommand("resume", "恢复订阅"),
         BotCommand("set_filter", "过滤订阅内容"),
         BotCommand("set_preview", "开关链接预览（on/off）"),
-        BotCommand("set_style", "设置消息样式（1-3）"),
+        BotCommand("set_style", "设置消息样式（1-5）"),
+        BotCommand("show_styles", "显示可用消息样式"),
         BotCommand("feedback", "发送反馈"),
         BotCommand("get_latest", "获取最新更新"),
         BotCommand("help", "显示此帮助")
@@ -206,6 +213,16 @@ def get_subscriptions(chat_id, is_channel):
             c = conn.cursor()
             c.execute("SELECT url, interval, paused, last_checked, filter_keyword FROM subscriptions WHERE chat_id=? AND is_channel=?", 
                      (chat_id, is_channel))
+            return c.fetchall()
+    finally:
+        conn.close()
+
+def get_all_subscriptions():
+    conn = sqlite3.connect('subscriptions.db', check_same_thread=False)
+    try:
+        with conn:
+            c = conn.cursor()
+            c.execute("SELECT chat_id, is_channel, url, interval, paused, last_checked, filter_keyword FROM subscriptions")
             return c.fetchall()
     finally:
         conn.close()
@@ -283,8 +300,9 @@ def is_post_sent(chat_id, post_link):
 
 async def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = str(update.effective_user.id)
+    logger.info(f"Checking authorization for user_id={user_id}")
     if user_id not in AUTHORIZED_USERS:
-        await update.message.reply_text(get_text(detect_language(update), 'error', '你无权使用'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(detect_language(update), 'error', 'You are not authorized'), parse_mode=ParseMode.HTML)
         return False
     return True
 
@@ -302,15 +320,28 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
+    logger.info(f"Starting subscription process for chat_id={update.effective_chat.id}")
     await update.message.reply_text(get_text(lang, 'subscribe_prompt'), parse_mode=ParseMode.HTML)
-    context.user_data['is_channel'] = update.effective_chat.type in ['channel', 'supergroup']
+    context.user_data['chat_id'] = update.effective_chat.id
     return WAITING_URL
 
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    is_channel = context.user_data.get('is_channel', False)
     lang = detect_language(update)
-    url = update.message.text.strip()
+    text = update.message.text.strip().split()
+    chat_id = context.user_data.get('chat_id', update.effective_chat.id)
+    is_channel = False
+    url = text[0]
+
+    if len(text) > 1 and text[0].startswith('@'):
+        try:
+            channel = await context.bot.get_chat(text[0])
+            chat_id = channel.id
+            is_channel = True
+            url = text[1]
+        except Exception as e:
+            await update.message.reply_text(get_text(lang, 'error', f"Invalid channel: {e}"), parse_mode=ParseMode.HTML)
+            return ConversationHandler.END
+
     try:
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         async with aiohttp.ClientSession() as session:
@@ -326,7 +357,8 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             logger.info(f"Found {len(feed.entries)} entries in {url}")
             add_subscription(chat_id, is_channel, url)
-            await update.message.reply_text(get_text(lang, 'subscribed', url), parse_mode=ParseMode.HTML)
+            channel_info = f" for channel {text[0]}" if is_channel else ""
+            await update.message.reply_text(get_text(lang, 'subscribed', url, channel_info), parse_mode=ParseMode.HTML)
     except asyncio.TimeoutError:
         await update.message.reply_text(get_text(lang, 'timeout', url), parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -336,44 +368,67 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
-    chat_id = update.effective_chat.id
-    is_channel = update.effective_chat.type in ['channel', 'supergroup']
     lang = detect_language(update)
-    subscriptions = get_subscriptions(chat_id, is_channel)
+    logger.info(f"Unsubscribe command triggered by user_id={update.effective_user.id}")
+    subscriptions = get_all_subscriptions()
     if not subscriptions:
+        logger.info("No subscriptions found")
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
         return ConversationHandler.END
     
-    keyboard = [[InlineKeyboardButton(f"{i+1}. {url}", callback_data=f"unsub_{url}")] 
-                for i, (url, _, _, _, _) in enumerate(subscriptions)]
+    keyboard = []
+    for idx, (chat_id, is_channel, url, _, _, _, _) in enumerate(subscriptions):
+        button_text = f"{chat_id} - {url[:30]}..." if len(url) > 30 else f"{chat_id} - {url}"
+        callback_data = f"unsub_{idx}"  # 使用索引而不是完整 URL
+        logger.info(f"Button {idx}: text={button_text}, callback_data={callback_data}")
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(get_text(lang, 'unsubscribe_prompt'), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    try:
+        await update.message.reply_text(get_text(lang, 'unsubscribe_prompt'), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        logger.info(f"Sent unsubscribe options with {len(keyboard)} buttons")
+    except BadRequest as e:
+        logger.error(f"Failed to send unsubscribe message: {e}")
+        await update.message.reply_text(get_text(lang, 'error', 'Failed to generate unsubscribe options'), parse_mode=ParseMode.HTML)
     return WAITING_UNSUBSCRIBE
 
 async def handle_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    chat_id = update.effective_chat.id
-    is_channel = update.effective_chat.type in ['channel', 'supergroup']
     lang = detect_language(update)
-    url = query.data.replace("unsub_", "")
-    remove_subscription(chat_id, is_channel, url)
-    await query.edit_message_text(get_text(lang, 'unsubscribed', url), parse_mode=ParseMode.HTML)
+    logger.info(f"Handling unsubscribe callback: {query.data}")
+    
+    try:
+        parts = query.data.split('_')
+        if len(parts) != 2 or parts[0] != 'unsub':
+            raise ValueError("Invalid callback data format")
+        idx = int(parts[1])
+        
+        subscriptions = get_all_subscriptions()
+        if idx < 0 or idx >= len(subscriptions):
+            raise ValueError("Invalid subscription index")
+        
+        chat_id, is_channel, url, _, _, _, _ = subscriptions[idx]
+        remove_subscription(chat_id, is_channel, url)
+        logger.info(f"Unsubscribed: chat_id={chat_id}, is_channel={is_channel}, url={url}")
+        await query.edit_message_text(get_text(lang, 'unsubscribed', url), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Error in handle_unsubscribe: {e}")
+        await query.edit_message_text(get_text(lang, 'error', str(e)), parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
 async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
-    chat_id = update.effective_chat.id
-    is_channel = update.effective_chat.type in ['channel', 'supergroup']
     lang = detect_language(update)
-    subscriptions = get_subscriptions(chat_id, is_channel)
+    subscriptions = get_all_subscriptions()
     if subscriptions:
         message = get_text(lang, 'list_subscriptions') + "\n"
-        for i, (url, interval, paused, last_checked, filter_keyword) in enumerate(subscriptions, 1):
+        for i, (chat_id, is_channel, url, interval, paused, last_checked, filter_keyword) in enumerate(subscriptions, 1):
             status = "Paused" if paused else "Active" if lang == 'en' else "暂停" if paused else "活跃"
             filter_text = filter_keyword or "None"
-            message += get_text(lang, 'status', i, url, status, interval, filter_text) + "\n"
+            chat_type = "Channel" if is_channel else "Private" if lang == 'en' else "频道" if is_channel else "私人"
+            message += get_text(lang, 'status', i, url, status, interval, filter_text, f"{chat_type} ({chat_id})") + "\n"
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     else:
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
@@ -468,12 +523,26 @@ async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lang = detect_language(update)
     chat_id = update.effective_chat.id
-    if len(context.args) != 1 or not context.args[0].isdigit() or int(context.args[0]) not in [1, 2, 3]:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /set_style 1|2|3'), parse_mode=ParseMode.HTML)
+    if len(context.args) != 1 or not context.args[0].isdigit() or int(context.args[0]) not in [1, 2, 3, 4, 5]:
+        await update.message.reply_text(get_text(lang, 'error', 'Usage: /set_style 1|2|3|4|5'), parse_mode=ParseMode.HTML)
         return
     style = int(context.args[0])
     update_user_settings(chat_id, message_style=style)
     await update.message.reply_text(get_text(lang, 'style_set', style), parse_mode=ParseMode.HTML)
+
+async def show_styles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_authorized(update, context):
+        return
+    lang = detect_language(update)
+    example_entry = {'title': 'Example Title', 'link': 'https://example.com'}
+    styles = [
+        f"Style 1:\n{format_rss_update(example_entry, 1)}",
+        f"Style 2:\n{format_rss_update(example_entry, 2)}",
+        f"Style 3:\n{format_rss_update(example_entry, 3)}",
+        f"Style 4:\n{format_rss_update(example_entry, 4)}",
+        f"Style 5:\n{format_rss_update(example_entry, 5)}"
+    ]
+    await update.message.reply_text(get_text(lang, 'styles_preview', '\n\n'.join(styles)), parse_mode=ParseMode.HTML)
 
 def clean_html(text):
     allowed_tags = ['b', 'i', 'u', 's', 'a', 'code', 'pre']
@@ -492,6 +561,10 @@ def format_rss_update(entry, style=1):
         return f"<b>{title}</b>\n🔗 <a href='{link}'>{link}</a>"
     elif style == 3:
         return f"📌 <b>{title}</b> [<a href='{link}'>Link</a>]"
+    elif style == 4:
+        return f"✨ <i>{title}</i>\n🌐 <a href='{link}'>{link}</a>"
+    elif style == 5:
+        return f"<code>{title}</code>\n📎 <a href='{link}'>Read More</a>"
     return f"<b>{title}</b>\n<a href='{link}'>{link}</a>"
 
 async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
@@ -517,7 +590,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
                         logger.info(f"Skipping {url}, interval not reached")
                         continue
                     
-                    logger.info(f"Checking feed {url}")
+                    logger.info(f"Checking feed {url} for chat_id={chat_id}")
                     try:
                         async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15), ssl=ssl_context) as response:
                             if response.status != 200:
@@ -541,7 +614,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
                             logger.info(f"No valid entries with timestamps in {url}")
                             continue
                         
-                        for entry in entries[:1]:
+                        for entry in entries[:10]:
                             post_link = entry.get('link', '#')
                             if not post_link:
                                 logger.warning(f"Entry from {url} has no link: {entry}")
@@ -553,7 +626,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
                             
                             if not is_post_sent(chat_id, post_link):
                                 formatted_entry = format_rss_update(entry, settings['message_style'])
-                                logger.info(f"Sending entry from {url}: {formatted_entry[:200]}")
+                                logger.info(f"Sending entry from {url}: {formatted_entry[:200]} to chat_id={chat_id}")
                                 try:
                                     await context.bot.send_message(
                                         chat_id,
@@ -564,7 +637,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
                                     save_sent_post(chat_id, post_link, current_time)
                                     logger.info(f"Marked as sent: {post_link}")
                                 except Exception as e:
-                                    logger.error(f"Failed to send {post_link}: {e}")
+                                    logger.error(f"Failed to send {post_link} to chat_id={chat_id}: {e}")
                             else:
                                 logger.info(f"Post already sent: {post_link}")
                         
@@ -653,6 +726,7 @@ def main():
     application.add_handler(CommandHandler("set_filter", set_filter))
     application.add_handler(CommandHandler("set_preview", set_preview))
     application.add_handler(CommandHandler("set_style", set_style))
+    application.add_handler(CommandHandler("show_styles", show_styles))
     application.add_handler(CommandHandler("feedback", feedback))
     application.add_handler(CommandHandler("get_latest", get_latest))
     application.add_handler(CommandHandler("help", help_command))
