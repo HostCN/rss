@@ -10,17 +10,29 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler
 from telegram.ext import filters
 from telegram.constants import ParseMode
-import aiohttp
 from telegram.error import BadRequest
+from playwright.async_api import async_playwright
+from asyncio import Semaphore
+from collections import deque
+
+# 限制同时运行的 Playwright 实例
+MAX_CONCURRENT_BROWSERS = 2
+semaphore = Semaphore(MAX_CONCURRENT_BROWSERS)
+
+# 批量处理消息的队列
+message_queue = deque()
+BATCH_SIZE = 10  # 每批处理的消息数量
+BATCH_INTERVAL = 5  # 每批处理间隔（秒）
 
 TOKEN = 'bot'
 AUTHORIZED_USERS = ['8111870448', '7554663120']
 
+# 日志设置
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.5',
     'Accept-Encoding': 'gzip, deflate, br',
@@ -29,6 +41,7 @@ HEADERS = {
     'Referer': 'https://www.google.com/',
 }
 
+# 多语言支持
 lang_dict = {
     'en': {
         'welcome': 'Welcome to RSS Bot! Here are the available commands:',
@@ -54,7 +67,7 @@ lang_dict = {
                 '<b>/resume URL</b> - Resume a feed\n'
                 '<b>/set_filter URL keyword</b> - Filter feed content\n'
                 '<b>/set_preview on|off</b> - Toggle link preview\n'
-                '<b>/set_style 1|2|3|4|5</b> - Set message style\n'
+                '<b>/set_style 1|2|3|4|5|6</b> - Set message style\n'
                 '<b>/show_styles</b> - Show available message styles\n'
                 '<b>/feedback text</b> - Send feedback\n'
                 '<b>/get_latest [number]</b> - Get latest updates\n'
@@ -95,7 +108,7 @@ lang_dict = {
                 '<b>/resume URL</b> - 恢复订阅\n'
                 '<b>/set_filter URL 关键词</b> - 过滤订阅内容\n'
                 '<b>/set_preview on|off</b> - 开关链接预览\n'
-                '<b>/set_style 1|2|3|4|5</b> - 设置消息样式\n'
+                '<b>/set_style 1|2|3|4|5|6</b> - 设置消息样式\n'
                 '<b>/show_styles</b> - 显示可用消息样式\n'
                 '<b>/feedback 反馈</b> - 发送反馈\n'
                 '<b>/get_latest [数量]</b> - 获取最新更新\n'
@@ -132,7 +145,7 @@ async def set_bot_commands(bot):
         BotCommand("resume", "Resume a feed"),
         BotCommand("set_filter", "Filter feed content"),
         BotCommand("set_preview", "Toggle link preview (on/off)"),
-        BotCommand("set_style", "Set message style (1-5)"),
+        BotCommand("set_style", "Set message style (1-6)"),
         BotCommand("show_styles", "Show available message styles"),
         BotCommand("feedback", "Send feedback"),
         BotCommand("get_latest", "Get latest updates"),
@@ -148,7 +161,7 @@ async def set_bot_commands(bot):
         BotCommand("resume", "恢复订阅"),
         BotCommand("set_filter", "过滤订阅内容"),
         BotCommand("set_preview", "开关链接预览（on/off）"),
-        BotCommand("set_style", "设置消息样式（1-5）"),
+        BotCommand("set_style", "设置消息样式（1-6）"),
         BotCommand("show_styles", "显示可用消息样式"),
         BotCommand("feedback", "发送反馈"),
         BotCommand("get_latest", "获取最新更新"),
@@ -157,6 +170,31 @@ async def set_bot_commands(bot):
     await bot.set_my_commands(commands=commands_en, language_code='en')
     await bot.set_my_commands(commands=commands_zh, language_code='zh')
 
+# 数据库连接池，修复closed属性问题
+class DatabasePool:
+    def __init__(self, db_name):
+        self.db_name = db_name
+        self.conn = None
+        self.is_closed = True  # 手动追踪连接状态
+        self.lock = asyncio.Lock()
+
+    async def get_conn(self):
+        async with self.lock:
+            if self.conn is None or self.is_closed:
+                self.conn = sqlite3.connect(self.db_name, check_same_thread=False)
+                self.is_closed = False
+            return self.conn
+
+    async def close(self):
+        async with self.lock:
+            if self.conn and not self.is_closed:
+                self.conn.close()
+                self.is_closed = True
+                self.conn = None
+
+db_pool = DatabasePool('subscriptions.db')
+
+# 初始化数据库
 def init_db():
     conn = sqlite3.connect('subscriptions.db', check_same_thread=False)
     c = conn.cursor()
@@ -167,6 +205,9 @@ def init_db():
                  (chat_id INTEGER PRIMARY KEY, link_preview BOOLEAN DEFAULT 1, message_style INTEGER DEFAULT 1, language TEXT DEFAULT 'en')''')
     c.execute('''CREATE TABLE IF NOT EXISTS sent_posts
                  (chat_id INTEGER, post_link TEXT, sent_time INTEGER, PRIMARY KEY (chat_id, post_link))''')
+    # 添加索引以加快查询速度
+    c.execute('CREATE INDEX IF NOT EXISTS idx_subscriptions_chat_id ON subscriptions(chat_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sent_posts_chat_id ON sent_posts(chat_id)')
     try:
         c.execute("ALTER TABLE subscriptions ADD COLUMN last_checked INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
@@ -186,6 +227,29 @@ def init_db():
     conn.commit()
     conn.close()
 
+async def batch_update_subscriptions(updates):
+    conn = await db_pool.get_conn()
+    try:
+        with conn:
+            c = conn.cursor()
+            for update in updates:
+                chat_id, is_channel, url, last_checked = update
+                c.execute("UPDATE subscriptions SET last_checked=? WHERE chat_id=? AND is_channel=? AND url=?", 
+                         (last_checked, chat_id, is_channel, url))
+    except Exception as e:
+        logger.error(f"批量更新订阅失败: {e}")
+        raise
+
+async def batch_save_sent_posts(posts):
+    conn = await db_pool.get_conn()
+    try:
+        with conn:
+            c = conn.cursor()
+            c.executemany("INSERT OR IGNORE INTO sent_posts (chat_id, post_link, sent_time) VALUES (?, ?, ?)", posts)
+    except Exception as e:
+        logger.error(f"批量保存已发送帖子失败: {e}")
+        raise
+
 def add_subscription(chat_id, is_channel, url, interval=60, paused=False, filter_keyword=None):
     conn = sqlite3.connect('subscriptions.db', check_same_thread=False)
     try:
@@ -193,6 +257,8 @@ def add_subscription(chat_id, is_channel, url, interval=60, paused=False, filter
             c = conn.cursor()
             c.execute("INSERT INTO subscriptions (chat_id, is_channel, url, interval, paused, last_checked, filter_keyword) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                      (chat_id, is_channel, url, interval, paused, 0, filter_keyword))
+    except Exception as e:
+        logger.error(f"添加订阅失败: {e}")
     finally:
         conn.close()
 
@@ -203,6 +269,8 @@ def remove_subscription(chat_id, is_channel, url):
             c = conn.cursor()
             c.execute("DELETE FROM subscriptions WHERE chat_id=? AND is_channel=? AND url=?", 
                      (chat_id, is_channel, url))
+    except Exception as e:
+        logger.error(f"移除订阅失败: {e}")
     finally:
         conn.close()
 
@@ -214,6 +282,9 @@ def get_subscriptions(chat_id, is_channel):
             c.execute("SELECT url, interval, paused, last_checked, filter_keyword FROM subscriptions WHERE chat_id=? AND is_channel=?", 
                      (chat_id, is_channel))
             return c.fetchall()
+    except Exception as e:
+        logger.error(f"获取订阅失败: {e}")
+        return []
     finally:
         conn.close()
 
@@ -224,6 +295,9 @@ def get_all_subscriptions():
             c = conn.cursor()
             c.execute("SELECT chat_id, is_channel, url, interval, paused, last_checked, filter_keyword FROM subscriptions")
             return c.fetchall()
+    except Exception as e:
+        logger.error(f"获取所有订阅失败: {e}")
+        return []
     finally:
         conn.close()
 
@@ -244,6 +318,8 @@ def update_subscription(chat_id, is_channel, url, interval=None, paused=None, la
             if filter_keyword is not None:
                 c.execute("UPDATE subscriptions SET filter_keyword=? WHERE chat_id=? AND is_channel=? AND url=?", 
                          (filter_keyword, chat_id, is_channel, url))
+    except Exception as e:
+        logger.error(f"更新订阅失败: {e}")
     finally:
         conn.close()
 
@@ -260,6 +336,9 @@ def get_user_settings(chat_id):
                 c.execute("INSERT INTO settings (chat_id, link_preview, message_style, language) VALUES (?, 1, 1, 'en')", (chat_id,))
                 conn.commit()
                 return {'link_preview': True, 'message_style': 1, 'language': 'en'}
+    except Exception as e:
+        logger.error(f"获取用户设置失败: {e}")
+        return {'link_preview': True, 'message_style': 1, 'language': 'en'}
     finally:
         conn.close()
 
@@ -276,6 +355,8 @@ def update_user_settings(chat_id, link_preview=None, message_style=None, languag
             if language is not None:
                 c.execute("UPDATE settings SET language=? WHERE chat_id=?", (language, chat_id))
             conn.commit()
+    except Exception as e:
+        logger.error(f"更新用户设置失败: {e}")
     finally:
         conn.close()
 
@@ -285,6 +366,8 @@ def save_sent_post(chat_id, post_link, sent_time):
         with conn:
             c = conn.cursor()
             c.execute("INSERT OR IGNORE INTO sent_posts (chat_id, post_link, sent_time) VALUES (?, ?, ?)", (chat_id, post_link, sent_time))
+    except Exception as e:
+        logger.error(f"保存已发送帖子失败: {e}")
     finally:
         conn.close()
 
@@ -295,14 +378,17 @@ def is_post_sent(chat_id, post_link):
             c = conn.cursor()
             c.execute("SELECT 1 FROM sent_posts WHERE chat_id=? AND post_link=?", (chat_id, post_link))
             return c.fetchone() is not None
+    except Exception as e:
+        logger.error(f"检查帖子是否已发送失败: {e}")
+        return False
     finally:
         conn.close()
 
 async def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = str(update.effective_user.id)
-    logger.info(f"Checking authorization for user_id={user_id}")
+    logger.info(f"检查用户授权，user_id={user_id}")
     if user_id not in AUTHORIZED_USERS:
-        await update.message.reply_text(get_text(detect_language(update), 'error', 'You are not authorized'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(detect_language(update), 'error', '你未被授权'), parse_mode=ParseMode.HTML)
         return False
     return True
 
@@ -320,10 +406,33 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    logger.info(f"Starting subscription process for chat_id={update.effective_chat.id}")
+    logger.info(f"开始订阅流程，chat_id={update.effective_chat.id}")
     await update.message.reply_text(get_text(lang, 'subscribe_prompt'), parse_mode=ParseMode.HTML)
     context.user_data['chat_id'] = update.effective_chat.id
     return WAITING_URL
+
+async def fetch_feed_with_playwright(url):
+    retries = 2
+    for attempt in range(retries):
+        async with semaphore:
+            try:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True, args=['--disable-gpu', '--no-sandbox'])
+                    context = await browser.new_context(user_agent=HEADERS['User-Agent'])
+                    page = await context.new_page()
+                    await page.goto(url, timeout=30000)
+                    content = await page.content()
+                    await browser.close()
+                    if "<rss" not in content and "<feed" not in content:
+                        logger.warning(f"链接 {url} 返回的内容不像是 RSS: {content[:200]}")
+                        return None
+                    return content
+            except Exception as e:
+                logger.error(f"Playwright 错误，链接 {url}: {e}")
+                if attempt == retries - 1:
+                    return None
+                await asyncio.sleep(2 ** attempt)
+    return None
 
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = detect_language(update)
@@ -339,28 +448,24 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_channel = True
             url = text[1]
         except Exception as e:
-            await update.message.reply_text(get_text(lang, 'error', f"Invalid channel: {e}"), parse_mode=ParseMode.HTML)
+            await update.message.reply_text(get_text(lang, 'error', f"无效频道: {e}"), parse_mode=ParseMode.HTML)
             return ConversationHandler.END
 
     try:
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15), ssl=ssl_context) as response:
-                if response.status != 200:
-                    raise ValueError(f"HTTP {response.status}")
-                content = await response.text()
-                logger.info(f"Response from {url}: {content[:1000]}")
+        content = await fetch_feed_with_playwright(url)
+        if content is None:
+            await update.message.reply_text(get_text(lang, 'timeout', url), parse_mode=ParseMode.HTML)
+            return ConversationHandler.END
+
         feed = feedparser.parse(content)
         if not feed.entries:
-            logger.warning(f"No entries found in {url}. Feed structure: {feed}")
+            logger.warning(f"链接 {url} 无条目。Feed 结构: {feed}")
             await update.message.reply_text(get_text(lang, 'empty_feed', url), parse_mode=ParseMode.HTML)
         else:
-            logger.info(f"Found {len(feed.entries)} entries in {url}")
+            logger.info(f"在 {url} 中找到 {len(feed.entries)} 个条目")
             add_subscription(chat_id, is_channel, url)
             channel_info = f" for channel {text[0]}" if is_channel else ""
             await update.message.reply_text(get_text(lang, 'subscribed', url, channel_info), parse_mode=ParseMode.HTML)
-    except asyncio.TimeoutError:
-        await update.message.reply_text(get_text(lang, 'timeout', url), parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(get_text(lang, 'error', str(e)), parse_mode=ParseMode.HTML)
     return ConversationHandler.END
@@ -369,51 +474,51 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    logger.info(f"Unsubscribe command triggered by user_id={update.effective_user.id}")
+    logger.info(f"用户触发取消订阅命令，user_id={update.effective_user.id}")
     subscriptions = get_all_subscriptions()
     if not subscriptions:
-        logger.info("No subscriptions found")
+        logger.info("未找到订阅")
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
         return ConversationHandler.END
     
     keyboard = []
     for idx, (chat_id, is_channel, url, _, _, _, _) in enumerate(subscriptions):
         button_text = f"{chat_id} - {url[:30]}..." if len(url) > 30 else f"{chat_id} - {url}"
-        callback_data = f"unsub_{idx}"  # 使用索引而不是完整 URL
-        logger.info(f"Button {idx}: text={button_text}, callback_data={callback_data}")
+        callback_data = f"unsub_{idx}"
+        logger.info(f"按钮 {idx}: text={button_text}, callback_data={callback_data}")
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         await update.message.reply_text(get_text(lang, 'unsubscribe_prompt'), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        logger.info(f"Sent unsubscribe options with {len(keyboard)} buttons")
+        logger.info(f"发送取消订阅选项，包含 {len(keyboard)} 个按钮")
     except BadRequest as e:
-        logger.error(f"Failed to send unsubscribe message: {e}")
-        await update.message.reply_text(get_text(lang, 'error', 'Failed to generate unsubscribe options'), parse_mode=ParseMode.HTML)
+        logger.error(f"无法发送取消订阅消息: {e}")
+        await update.message.reply_text(get_text(lang, 'error', '无法生成取消订阅选项'), parse_mode=ParseMode.HTML)
     return WAITING_UNSUBSCRIBE
 
 async def handle_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     lang = detect_language(update)
-    logger.info(f"Handling unsubscribe callback: {query.data}")
+    logger.info(f"处理取消订阅回调: {query.data}")
     
     try:
         parts = query.data.split('_')
         if len(parts) != 2 or parts[0] != 'unsub':
-            raise ValueError("Invalid callback data format")
+            raise ValueError("无效的回调数据格式")
         idx = int(parts[1])
         
         subscriptions = get_all_subscriptions()
         if idx < 0 or idx >= len(subscriptions):
-            raise ValueError("Invalid subscription index")
+            raise ValueError("无效的订阅索引")
         
         chat_id, is_channel, url, _, _, _, _ = subscriptions[idx]
         remove_subscription(chat_id, is_channel, url)
-        logger.info(f"Unsubscribed: chat_id={chat_id}, is_channel={is_channel}, url={url}")
+        logger.info(f"取消订阅: chat_id={chat_id}, is_channel={is_channel}, url={url}")
         await query.edit_message_text(get_text(lang, 'unsubscribed', url), parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Error in handle_unsubscribe: {e}")
+        logger.error(f"handle_unsubscribe 中出错: {e}")
         await query.edit_message_text(get_text(lang, 'error', str(e)), parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
@@ -438,7 +543,7 @@ async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lang = detect_language(update)
     if len(context.args) != 2 or not context.args[1].isdigit():
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /set_interval URL interval'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_interval URL interval'), parse_mode=ParseMode.HTML)
         return
     url, interval = context.args
     chat_id = update.effective_chat.id
@@ -456,7 +561,7 @@ async def pause_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     lang = detect_language(update)
     if len(context.args) != 1:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /pause URL'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(lang, 'error', '用法: /pause URL'), parse_mode=ParseMode.HTML)
         return
     url = context.args[0]
     chat_id = update.effective_chat.id
@@ -474,7 +579,7 @@ async def resume_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     lang = detect_language(update)
     if len(context.args) != 1:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /resume URL'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(lang, 'error', '用法: /resume URL'), parse_mode=ParseMode.HTML)
         return
     url = context.args[0]
     chat_id = update.effective_chat.id
@@ -492,7 +597,7 @@ async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lang = detect_language(update)
     if len(context.args) < 2:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /set_filter URL keyword'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_filter URL keyword'), parse_mode=ParseMode.HTML)
         return
     url = context.args[0]
     keyword = ' '.join(context.args[1:])
@@ -502,7 +607,7 @@ async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for sub_url, _, _, _, _ in subscriptions:
         if sub_url == url:
             update_subscription(chat_id, is_channel, url, filter_keyword=keyword)
-            await update.message.reply_text(f"Filter for <a href='{url}'>{url}</a> set to <code>{keyword}</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(f"过滤器为 <a href='{url}'>{url}</a> 设置为 <code>{keyword}</code>", parse_mode=ParseMode.HTML)
             return
     await update.message.reply_text(get_text(lang, 'not_found'), parse_mode=ParseMode.HTML)
 
@@ -512,7 +617,7 @@ async def set_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = detect_language(update)
     chat_id = update.effective_chat.id
     if len(context.args) != 1 or context.args[0].lower() not in ['on', 'off']:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /set_preview on|off'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_preview on|off'), parse_mode=ParseMode.HTML)
         return
     preview = context.args[0].lower() == 'on'
     update_user_settings(chat_id, link_preview=preview)
@@ -523,8 +628,8 @@ async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lang = detect_language(update)
     chat_id = update.effective_chat.id
-    if len(context.args) != 1 or not context.args[0].isdigit() or int(context.args[0]) not in [1, 2, 3, 4, 5]:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /set_style 1|2|3|4|5'), parse_mode=ParseMode.HTML)
+    if len(context.args) != 1 or not context.args[0].isdigit() or int(context.args[0]) not in [1, 2, 3, 4, 5, 6]:
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_style 1|2|3|4|5|6'), parse_mode=ParseMode.HTML)
         return
     style = int(context.args[0])
     update_user_settings(chat_id, message_style=style)
@@ -534,13 +639,14 @@ async def show_styles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    example_entry = {'title': 'Example Title', 'link': 'https://example.com'}
+    example_entry = {'title': '示例标题', 'link': 'https://example.com'}
     styles = [
-        f"Style 1:\n{format_rss_update(example_entry, 1)}",
-        f"Style 2:\n{format_rss_update(example_entry, 2)}",
-        f"Style 3:\n{format_rss_update(example_entry, 3)}",
-        f"Style 4:\n{format_rss_update(example_entry, 4)}",
-        f"Style 5:\n{format_rss_update(example_entry, 5)}"
+        f"样式 1:\n{format_rss_update(example_entry, 1)[0]}",
+        f"样式 2:\n{format_rss_update(example_entry, 2)[0]}",
+        f"样式 3:\n{format_rss_update(example_entry, 3)[0]}",
+        f"样式 4:\n{format_rss_update(example_entry, 4)[0]}",
+        f"样式 5:\n{format_rss_update(example_entry, 5)[0]}",
+        f"样式 6:\n{format_rss_update(example_entry, 6)[0]}"
     ]
     await update.message.reply_text(get_text(lang, 'styles_preview', '\n\n'.join(styles)), parse_mode=ParseMode.HTML)
 
@@ -553,106 +659,148 @@ def clean_html(text):
     return cleaned
 
 def format_rss_update(entry, style=1):
-    title = clean_html(entry.get('title', 'No title'))
+    title = clean_html(entry.get('title', '无标题'))
     link = entry.get('link', '#')
     if style == 1:
-        return f"<b>{title}</b>\n<a href='{link}'>{link}</a>"
+        return f"<b>{title}</b>\n<a href='{link}'>{link}</a>", link
     elif style == 2:
-        return f"<b>{title}</b>\n🔗 <a href='{link}'>{link}</a>"
+        return f"<b>{title}</b>\n🔗 <a href='{link}'>{link}</a>", link
     elif style == 3:
-        return f"📌 <b>{title}</b> [<a href='{link}'>Link</a>]"
+        return f"📌 <b>{title}</b> [<a href='{link}'>链接</a>]", link
     elif style == 4:
-        return f"✨ <i>{title}</i>\n🌐 <a href='{link}'>{link}</a>"
+        return f"✨ <i>{title}</i>\n🌐 <a href='{link}'>{link}</a>", link
     elif style == 5:
-        return f"<code>{title}</code>\n📎 <a href='{link}'>Read More</a>"
-    return f"<b>{title}</b>\n<a href='{link}'>{link}</a>"
+        return f"<code>{title}</code>\n📎 <a href='{link}'>阅读更多</a>", link
+    elif style == 6:
+        return f"<a href='{link}'>{title}</a>", link
+    return f"<b>{title}</b>\n<a href='{link}'>{link}</a>", link
+
+async def process_message_queue(context: ContextTypes.DEFAULT_TYPE):
+    while message_queue:
+        batch = []
+        for _ in range(min(BATCH_SIZE, len(message_queue))):
+            batch.append(message_queue.popleft())
+        
+        # 按时间戳排序
+        batch.sort(key=lambda x: x['timestamp'])
+        
+        sent_posts = []
+        for item in batch:
+            chat_id = item['chat_id']
+            message = item['message']
+            disable_preview = item['disable_preview']
+            post_link = item['post_link']
+            sent_time = item['timestamp']
+            
+            try:
+                await context.bot.send_message(
+                    chat_id,
+                    message,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=disable_preview
+                )
+                sent_posts.append((chat_id, post_link, sent_time))
+            except Exception as e:
+                logger.error(f"发送消息失败，chat_id={chat_id}: {e}")
+        
+        if sent_posts:
+            await batch_save_sent_posts(sent_posts)
 
 async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('subscriptions.db', check_same_thread=False)
     try:
+        conn = await db_pool.get_conn()
         with conn:
             c = conn.cursor()
             c.execute("SELECT DISTINCT chat_id, is_channel FROM subscriptions")
             chats = c.fetchall()
         
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        async with aiohttp.ClientSession() as session:
-            for chat_id, is_channel in chats:
-                subscriptions = get_subscriptions(chat_id, is_channel)
-                settings = get_user_settings(chat_id)
-                lang = settings['language']
-                for url, interval, paused, last_checked, filter_keyword in subscriptions:
-                    if paused:
-                        logger.info(f"Skipping paused feed: {url}")
-                        continue
-                    current_time = int(time.time())
-                    if current_time - last_checked < interval:
-                        logger.info(f"Skipping {url}, interval not reached")
-                        continue
-                    
-                    logger.info(f"Checking feed {url} for chat_id={chat_id}")
-                    try:
-                        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15), ssl=ssl_context) as response:
-                            if response.status != 200:
-                                logger.error(f"Failed to fetch {url}: HTTP {response.status}")
-                                await context.bot.send_message(chat_id, get_text(lang, 'feed_unhealthy', url), parse_mode=ParseMode.HTML)
-                                continue
-                            content = await response.text()
-                            feed = feedparser.parse(content)
-                        
-                        if not feed.entries:
-                            logger.info(f"No entries in feed from {url}: {content[:200]}")
-                            await context.bot.send_message(chat_id, get_text(lang, 'empty_feed', url), parse_mode=ParseMode.HTML)
-                            continue
-                        
-                        entries = sorted(
-                            [e for e in feed.entries if e.get('published_parsed') or e.get('updated_parsed')],
-                            key=lambda x: time.mktime(x.get('published_parsed') or x.get('updated_parsed')),
-                            reverse=True
+        updates_to_commit = []
+        for chat_id, is_channel in chats:
+            subscriptions = get_subscriptions(chat_id, is_channel)
+            settings = get_user_settings(chat_id)
+            lang = settings['language']
+            
+            for url, interval, paused, last_checked, filter_keyword in subscriptions:
+                if paused:
+                    logger.info(f"跳过暂停的链接: {url}")
+                    continue
+                current_time = int(time.time())
+                if current_time - last_checked < interval:
+                    logger.info(f"跳过 {url}，未到检查间隔")
+                    continue
+                
+                logger.info(f"检查链接 {url}，chat_id={chat_id}")
+                try:
+                    content = await fetch_feed_with_playwright(url)
+                    if content is None:
+                        logger.error(f"无法获取链接 {url} 的内容")
+                        await context.bot.send_message(
+                            chat_id,
+                            get_text(lang, 'feed_unhealthy', url),
+                            parse_mode=ParseMode.HTML
                         )
-                        if not entries:
-                            logger.info(f"No valid entries with timestamps in {url}")
+                        continue
+
+                    feed = feedparser.parse(content)
+                    if not feed.entries:
+                        logger.info(f"链接 {url} 无条目: {content[:200]}")
+                        await context.bot.send_message(
+                            chat_id,
+                            get_text(lang, 'empty_feed', url),
+                            parse_mode=ParseMode.HTML
+                        )
+                        continue
+                    
+                    entries = sorted(
+                        [e for e in feed.entries if e.get('published_parsed') or e.get('updated_parsed')],
+                        key=lambda x: time.mktime(x.get('published_parsed') or x.get('updated_parsed')),
+                        reverse=True
+                    )
+                    if not entries:
+                        logger.info(f"链接 {url} 无有效时间戳的条目")
+                        continue
+                    
+                    for entry in entries[:10]:
+                        post_link = entry.get('link', '#')
+                        if not post_link:
+                            logger.warning(f"链接 {url} 的条目无链接: {entry}")
                             continue
                         
-                        for entry in entries[:10]:
-                            post_link = entry.get('link', '#')
-                            if not post_link:
-                                logger.warning(f"Entry from {url} has no link: {entry}")
-                                continue
-                            
-                            if filter_keyword and filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
-                                logger.info(f"Entry filtered out by '{filter_keyword}': {post_link}")
-                                continue
-                            
-                            if not is_post_sent(chat_id, post_link):
-                                formatted_entry = format_rss_update(entry, settings['message_style'])
-                                logger.info(f"Sending entry from {url}: {formatted_entry[:200]} to chat_id={chat_id}")
-                                try:
-                                    await context.bot.send_message(
-                                        chat_id,
-                                        formatted_entry,
-                                        parse_mode=ParseMode.HTML,
-                                        disable_web_page_preview=not settings['link_preview']
-                                    )
-                                    save_sent_post(chat_id, post_link, current_time)
-                                    logger.info(f"Marked as sent: {post_link}")
-                                except Exception as e:
-                                    logger.error(f"Failed to send {post_link} to chat_id={chat_id}: {e}")
-                            else:
-                                logger.info(f"Post already sent: {post_link}")
+                        if filter_keyword and filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
+                            logger.info(f"条目被过滤，关键字 '{filter_keyword}': {post_link}")
+                            continue
                         
-                        update_subscription(chat_id, is_channel, url, last_checked=current_time)
+                        if not is_post_sent(chat_id, post_link):
+                            formatted_entry, link = format_rss_update(entry, settings['message_style'])
+                            timestamp = int(time.mktime(entry.get('published_parsed') or entry.get('updated_parsed') or time.gmtime()))
+                            message_queue.append({
+                                'chat_id': chat_id,
+                                'message': formatted_entry,
+                                'disable_preview': not settings['link_preview'],
+                                'post_link': link,
+                                'timestamp': timestamp
+                            })
                     
-                    except asyncio.TimeoutError:
-                        logger.error(f"Timeout fetching {url}")
-                        await context.bot.send_message(chat_id, get_text(lang, 'timeout', url), parse_mode=ParseMode.HTML)
-                    except Exception as e:
-                        logger.error(f"Error checking {url}: {e}")
-                        await context.bot.send_message(chat_id, get_text(lang, 'feed_unhealthy', url), parse_mode=ParseMode.HTML)
+                    updates_to_commit.append((chat_id, is_channel, url, current_time))
+                
+                except Exception as e:
+                    logger.error(f"检查 {url} 时出错: {e}")
+                    await context.bot.send_message(
+                        chat_id,
+                        get_text(lang, 'feed_unhealthy', url),
+                        parse_mode=ParseMode.HTML
+                    )
+        
+        if updates_to_commit:
+            await batch_update_subscriptions(updates_to_commit)
+        
+        if message_queue:
+            await process_message_queue(context)
+    
     except Exception as e:
-        logger.error(f"Unexpected error in check_latest_posts: {e}")
-    finally:
-        conn.close()
+        logger.error(f"check_latest_posts 中发生意外错误: {e}")
+        # Optionally, re-raise to let the job queue handle it
+        # raise
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
@@ -665,10 +813,10 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lang = detect_language(update)
     if not context.args:
-        await update.message.reply_text(get_text(lang, 'error', 'Usage: /feedback text'), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(get_text(lang, 'error', '用法: /feedback text'), parse_mode=ParseMode.HTML)
         return
     feedback_text = ' '.join(context.args)
-    logger.info(f"Feedback from {update.effective_user.id}: {feedback_text}")
+    logger.info(f"来自 {update.effective_user.id} 的反馈: {feedback_text}")
     await update.message.reply_text(get_text(lang, 'feedback_thanks'), parse_mode=ParseMode.HTML)
 
 async def get_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -688,29 +836,27 @@ async def get_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_user_settings(chat_id)
     await update.message.reply_text(get_text(lang, 'latest_updates', num_updates), parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
     updates_found = False
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-    async with aiohttp.ClientSession() as session:
-        for url, _, _, _, filter_keyword in subscriptions:
-            try:
-                async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15), ssl=ssl_context) as response:
-                    if response.status != 200:
-                        logger.error(f"Failed to fetch {url}: HTTP {response.status}")
-                        continue
-                    content = await response.text()
-                    feed = feedparser.parse(content)
-                    if not feed.entries:
-                        logger.info(f"No entries in feed from {url}: {content[:200]}")
-                        continue
-                    logger.info(f"Found {len(feed.entries)} entries in {url}")
-                    for entry in feed.entries[:num_updates]:
-                        if filter_keyword and filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
-                            continue
-                        formatted_entry = format_rss_update(entry, settings['message_style'])
-                        logger.info(f"Sending entry from {url}: {formatted_entry[:200]}")
-                        await update.message.reply_text(formatted_entry, parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
-                        updates_found = True
-            except Exception as e:
-                logger.error(f"Get latest failed for {url}: {e}")
+    for url, _, _, _, filter_keyword in subscriptions:
+        try:
+            content = await fetch_feed_with_playwright(url)
+            if content is None:
+                logger.error(f"无法获取链接 {url} 的内容")
+                continue
+
+            feed = feedparser.parse(content)
+            if not feed.entries:
+                logger.info(f"链接 {url} 无条目: {content[:200]}")
+                continue
+            logger.info(f"在 {url} 中找到 {len(feed.entries)} 个条目")
+            for entry in feed.entries[:num_updates]:
+                if filter_keyword and filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
+                    continue
+                formatted_entry, _ = format_rss_update(entry, settings['message_style'])
+                logger.info(f"发送条目，来自 {url}: {formatted_entry[:200]}")
+                await update.message.reply_text(formatted_entry, parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
+                updates_found = True
+        except Exception as e:
+            logger.error(f"获取最新条目失败，链接 {url}: {e}")
     if not updates_found:
         await update.message.reply_text(get_text(lang, 'no_updates'), parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
 
@@ -746,9 +892,9 @@ def main():
     application.add_handler(unsubscribe_handler)
 
     if application.job_queue is None:
-        raise RuntimeError("JobQueue is not available.")
+        raise RuntimeError("JobQueue 不可用。")
     
-    application.job_queue.run_repeating(check_latest_posts, interval=20, first=0)
+    application.job_queue.run_repeating(check_latest_posts, interval=30, first=0)
 
     application.run_polling()
 
