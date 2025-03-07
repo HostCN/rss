@@ -25,8 +25,8 @@ BATCH_SIZE = 10  # 每批处理的消息数量
 BATCH_INTERVAL = 5  # 每批处理间隔（秒）
 
 # 请替换为实际的 Telegram Bot Token 和用户 ID
-TOKEN = 'bot'
-AUTHORIZED_USERS = ['8111870448', '7554663120']
+TOKEN = 'Telegram Bot Token'
+AUTHORIZED_USERS = ['用户 ID1', '用户 ID2']
 
 # 日志设置
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -63,20 +63,20 @@ lang_dict = {
                 '<b>/subscribe</b> - Add RSS feed (URL or @ChannelName URL)\n'
                 '<b>/unsubscribe</b> - Remove an RSS feed\n'
                 '<b>/list</b> - Show your subscriptions\n'
-                '<b>/set_interval URL interval</b> - Set check interval (seconds)\n'
+                '<b>/set_interval [@ChannelName] URL interval</b> - Set check interval (seconds)\n'
                 '<b>/pause URL</b> - Pause a feed\n'
                 '<b>/resume URL</b> - Resume a feed\n'
-                '<b>/set_filter URL keyword [--tag]</b> - Filter by keyword or tag\n'
+                '<b>/set_filter [@ChannelName] URL keyword [--tag]</b> - Filter by keyword or tag\n'
                 '<b>/set_tag URL @ChannelName tag</b> - Set a custom tag for a specific feed in a channel\n'
-                '<b>/set_preview on|off</b> - Toggle link preview\n'
-                '<b>/set_style 1|2|3|4|5|6|7|8</b> - Set message style\n'
+                '<b>/set_preview [@ChannelName] on|off</b> - Toggle link preview\n'
+                '<b>/set_style [@ChannelName] 1|2|3|4|5|6|7|8|9|10</b> - Set message style\n'
                 '<b>/show_styles</b> - Show available message styles\n'
                 '<b>/feedback text</b> - Send feedback\n'
-                '<b>/get_latest [number]</b> - Get latest updates\n'
+                '<b>/get_latest [@ChannelName] URL [number]</b> - Get latest updates\n'
                 '<b>/help</b> - Show this help',
         'feedback_thanks': 'Thanks for your feedback!',
         'error': 'Error: {0}',
-        'get_latest_prompt': 'Specify number of updates: /get_latest [number] (default 1)',
+        'get_latest_prompt': 'Specify number of updates: /get_latest [@ChannelName] URL [number] (default 1)',
         'latest_updates': 'Latest {0} update(s):',
         'no_updates': 'No new updates.',
         'feed_unhealthy': 'Warning: <a href="{0}">{0}</a> is unresponsive.',
@@ -106,20 +106,20 @@ lang_dict = {
                 '<b>/subscribe</b> - 添加RSS订阅（URL或@ChannelName URL）\n'
                 '<b>/unsubscribe</b> - 取消RSS订阅\n'
                 '<b>/list</b> - 查看订阅列表\n'
-                '<b>/set_interval URL 间隔</b> - 设置检查间隔（秒）\n'
+                '<b>/set_interval [@ChannelName] URL 间隔</b> - 设置检查间隔（秒）\n'
                 '<b>/pause URL</b> - 暂停订阅\n'
                 '<b>/resume URL</b> - 恢复订阅\n'
-                '<b>/set_filter URL 关键词 [--tag]</b> - 按关键词或标签过滤\n'
+                '<b>/set_filter [@ChannelName] URL 关键词 [--tag]</b> - 按关键词或标签过滤\n'
                 '<b>/set_tag URL @ChannelName 标签</b> - 为频道中的指定订阅设置自定义标签\n'
-                '<b>/set_preview on|off</b> - 开关链接预览\n'
-                '<b>/set_style 1|2|3|4|5|6|7|8</b> - 设置消息样式\n'
+                '<b>/set_preview [@ChannelName] on|off</b> - 开关链接预览\n'
+                '<b>/set_style [@ChannelName] 1|2|3|4|5|6|7|8|9|10</b> - 设置消息样式\n'
                 '<b>/show_styles</b> - 显示可用消息样式\n'
                 '<b>/feedback 反馈</b> - 发送反馈\n'
-                '<b>/get_latest [数量]</b> - 获取最新更新\n'
+                '<b>/get_latest [@ChannelName] URL [数量]</b> - 获取最新更新\n'
                 '<b>/help</b> - 显示此帮助',
         'feedback_thanks': '感谢你的反馈！',
         'error': '错误：{0}',
-        'get_latest_prompt': '请指定更新数量：/get_latest [数量]（默认1）',
+        'get_latest_prompt': '请指定更新数量：/get_latest [@ChannelName] URL [数量]（默认1）',
         'latest_updates': '最新{0}条更新：',
         'no_updates': '没有新更新。',
         'feed_unhealthy': '警告：<a href="{0}">{0}</a> 无响应。',
@@ -151,7 +151,7 @@ async def set_bot_commands(bot):
         BotCommand("set_filter", "Filter feed content by keyword or tag"),
         BotCommand("set_tag", "Set a custom tag for a specific feed in a channel"),
         BotCommand("set_preview", "Toggle link preview (on/off)"),
-        BotCommand("set_style", "Set message style (1-8)"),
+        BotCommand("set_style", "Set message style for chat or channel"),
         BotCommand("show_styles", "Show available message styles"),
         BotCommand("feedback", "Send feedback"),
         BotCommand("get_latest", "Get latest updates"),
@@ -168,7 +168,7 @@ async def set_bot_commands(bot):
         BotCommand("set_filter", "按关键词或标签过滤订阅内容"),
         BotCommand("set_tag", "为频道中的指定订阅设置自定义标签"),
         BotCommand("set_preview", "开关链接预览（on/off）"),
-        BotCommand("set_style", "设置消息样式（1-8）"),
+        BotCommand("set_style", "为聊天或频道设置消息样式"),
         BotCommand("show_styles", "显示可用消息样式"),
         BotCommand("feedback", "发送反馈"),
         BotCommand("get_latest", "获取最新更新"),
@@ -553,15 +553,33 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
 
 async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"收到 /set_interval 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    if len(context.args) != 2 or not context.args[1].isdigit():
-        await update.message.reply_text(get_text(lang, 'error', '用法: /set_interval URL interval'), parse_mode=ParseMode.HTML)
+    args = context.args
+
+    if len(args) not in [2, 3] or not args[-1].isdigit():
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_interval [@ChannelName] URL interval'), parse_mode=ParseMode.HTML)
         return
-    url, interval = context.args
-    chat_id = update.effective_chat.id
-    is_channel = update.effective_chat.type in ['channel', 'supergroup']
+
+    if len(args) == 2:
+        chat_id = update.effective_chat.id
+        is_channel = update.effective_chat.type in ['channel', 'supergroup']
+        url, interval = args
+    else:
+        channel_name, url, interval = args
+        if not channel_name.startswith('@'):
+            await update.message.reply_text(get_text(lang, 'error', '第一个参数必须是 @ChannelName'), parse_mode=ParseMode.HTML)
+            return
+        try:
+            channel = await context.bot.get_chat(channel_name)
+            chat_id = channel.id
+            is_channel = True
+        except Exception as e:
+            await update.message.reply_text(get_text(lang, 'error', f"无法获取频道信息: {e}"), parse_mode=ParseMode.HTML)
+            return
+
     subscriptions = get_subscriptions(chat_id, is_channel)
     for sub_url, _, _, _, _, _ in subscriptions:
         if sub_url == url:
@@ -607,19 +625,39 @@ async def resume_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(get_text(lang, 'not_found'), parse_mode=ParseMode.HTML)
 
 async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"收到 /set_filter 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    if len(context.args) < 2:
-        await update.message.reply_text(get_text(lang, 'error', '用法: /set_filter URL keyword [--tag]'), parse_mode=ParseMode.HTML)
+    args = context.args
+
+    if len(args) < 2:
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_filter [@ChannelName] URL keyword [--tag]'), parse_mode=ParseMode.HTML)
         return
-    url = context.args[0]
-    args = context.args[1:]
-    is_tag_filter = '--tag' in args
-    keyword = ' '.join(arg for arg in args if arg != '--tag')
-    
-    chat_id = update.effective_chat.id
-    is_channel = update.effective_chat.type in ['channel', 'supergroup']
+
+    if args[0].startswith('@'):
+        if len(args) < 3:
+            await update.message.reply_text(get_text(lang, 'error', '用法: /set_filter [@ChannelName] URL keyword [--tag]'), parse_mode=ParseMode.HTML)
+            return
+        channel_name = args[0]
+        url = args[1]
+        filter_args = args[2:]
+        try:
+            channel = await context.bot.get_chat(channel_name)
+            chat_id = channel.id
+            is_channel = True
+        except Exception as e:
+            await update.message.reply_text(get_text(lang, 'error', f"无法获取频道信息: {e}"), parse_mode=ParseMode.HTML)
+            return
+    else:
+        chat_id = update.effective_chat.id
+        is_channel = update.effective_chat.type in ['channel', 'supergroup']
+        url = args[0]
+        filter_args = args[1:]
+
+    is_tag_filter = '--tag' in filter_args
+    keyword = ' '.join(arg for arg in filter_args if arg != '--tag')
+
     subscriptions = get_subscriptions(chat_id, is_channel)
     for sub_url, _, _, _, _, _ in subscriptions:
         if sub_url == url:
@@ -637,42 +675,30 @@ async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"收到 /set_tag 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
     if not await is_authorized(update, context):
-        logger.warning(f"用户未授权，user_id={update.effective_user.id}")
         return
     lang = detect_language(update)
 
-    # 检查参数格式
     if len(context.args) < 3:
         await update.message.reply_text(get_text(lang, 'error', '用法: /set_tag URL @ChannelName tag'), parse_mode=ParseMode.HTML)
-        logger.warning("参数不足，发送用法提示")
         return
 
     url = context.args[0]
     channel_name = context.args[1]
     tag = ' '.join(context.args[2:])
 
-    # 确保第二个参数是 @ChannelName 格式
     if not channel_name.startswith('@'):
         await update.message.reply_text(get_text(lang, 'error', '第二个参数必须是 @ChannelName'), parse_mode=ParseMode.HTML)
-        logger.warning("参数格式错误，第二个参数不是 @ChannelName")
         return
 
     try:
-        # 获取频道信息
         channel = await context.bot.get_chat(channel_name)
         chat_id = channel.id
-        is_channel = True  # 既然是 @ChannelName，强制为频道
-        logger.info(f"获取频道信息成功，channel_name={channel_name}, chat_id={chat_id}")
+        is_channel = True
     except Exception as e:
         await update.message.reply_text(get_text(lang, 'error', f"无法获取频道信息: {e}"), parse_mode=ParseMode.HTML)
-        logger.error(f"获取频道信息失败，channel_name={channel_name}, 错误: {e}")
         return
 
-    # 获取该频道的所有订阅并查找指定 URL
     subscriptions = get_subscriptions(chat_id, is_channel)
-    logger.info(f"找到 {len(subscriptions)} 个订阅，chat_id={chat_id}, is_channel={is_channel}")
-
-    # 检查是否有匹配的订阅
     for sub_url, _, _, _, _, _ in subscriptions:
         if sub_url == url:
             update_subscription(chat_id, is_channel, url, tag=tag)
@@ -680,39 +706,81 @@ async def set_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"已为频道 <a href='https://t.me/{channel_name[1:]}'>{channel_name}</a> 的订阅 <a href='{url}'>{url}</a> 设置标签为 <code>{tag}</code>",
                 parse_mode=ParseMode.HTML
             )
-            logger.info(f"成功设置标签，url={url}, channel={channel_name}, tag={tag}")
             return
 
-    # 如果未找到订阅
     await update.message.reply_text(
         f"在频道 <a href='https://t.me/{channel_name[1:]}'>{channel_name}</a> 中未找到订阅 <a href='{url}'>{url}</a>",
         parse_mode=ParseMode.HTML
     )
-    logger.warning(f"未找到订阅，url={url}, channel={channel_name}")
 
 async def set_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"收到 /set_preview 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    chat_id = update.effective_chat.id
-    if len(context.args) != 1 or context.args[0].lower() not in ['on', 'off']:
-        await update.message.reply_text(get_text(lang, 'error', '用法: /set_preview on|off'), parse_mode=ParseMode.HTML)
+    args = context.args
+
+    if len(args) not in [1, 2] or args[-1].lower() not in ['on', 'off']:
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_preview [@ChannelName] on|off'), parse_mode=ParseMode.HTML)
         return
-    preview = context.args[0].lower() == 'on'
+
+    if len(args) == 1:
+        chat_id = update.effective_chat.id
+        preview = args[0].lower() == 'on'
+    else:
+        channel_name = args[0]
+        if not channel_name.startswith('@'):
+            await update.message.reply_text(get_text(lang, 'error', '第一个参数必须是 @ChannelName'), parse_mode=ParseMode.HTML)
+            return
+        preview = args[1].lower() == 'on'
+        try:
+            channel = await context.bot.get_chat(channel_name)
+            chat_id = channel.id
+        except Exception as e:
+            await update.message.reply_text(get_text(lang, 'error', f"无法获取频道信息: {e}"), parse_mode=ParseMode.HTML)
+            return
+
     update_user_settings(chat_id, link_preview=preview)
     await update.message.reply_text(get_text(lang, 'preview_set', 'on' if preview else 'off'), parse_mode=ParseMode.HTML)
 
 async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"收到 /set_style 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    chat_id = update.effective_chat.id
-    if len(context.args) != 1 or not context.args[0].isdigit() or int(context.args[0]) not in range(1, 9):
-        await update.message.reply_text(get_text(lang, 'error', '用法: /set_style 1|2|3|4|5|6|7|8'), parse_mode=ParseMode.HTML)
+
+    args = context.args
+    if len(args) not in [1, 2]:
+        await update.message.reply_text(get_text(lang, 'error', '用法: /set_style [@ChannelName] 1|2|3|4|5|6|7|8|9|10'), parse_mode=ParseMode.HTML)
         return
-    style = int(context.args[0])
+
+    if len(args) == 1:
+        chat_id = update.effective_chat.id
+        style = args[0]
+    else:
+        channel_name = args[0]
+        style = args[1]
+        if not channel_name.startswith('@'):
+            await update.message.reply_text(get_text(lang, 'error', '第一个参数必须是 @ChannelName'), parse_mode=ParseMode.HTML)
+            return
+        try:
+            channel = await context.bot.get_chat(channel_name)
+            chat_id = channel.id
+        except Exception as e:
+            await update.message.reply_text(get_text(lang, 'error', f"无法获取频道信息: {e}"), parse_mode=ParseMode.HTML)
+            return
+
+    if not style.isdigit() or int(style) not in range(1, 11):
+        await update.message.reply_text(get_text(lang, 'error', '样式编号必须是 1-10'), parse_mode=ParseMode.HTML)
+        return
+
+    style = int(style)
     update_user_settings(chat_id, message_style=style)
-    await update.message.reply_text(get_text(lang, 'style_set', style), parse_mode=ParseMode.HTML)
+    target_text = f"频道 <a href='https://t.me/{channel_name[1:]}'>{channel_name}</a>" if len(args) == 2 else "当前聊天"
+    await update.message.reply_text(
+        f"已为 {target_text} 设置消息样式为 <b>样式 {style}</b>",
+        parse_mode=ParseMode.HTML
+    )
 
 async def show_styles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
@@ -720,14 +788,16 @@ async def show_styles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = detect_language(update)
     example_entry = {'title': '示例标题', 'link': 'https://example.com'}
     styles = [
-        f"样式 1:\n{format_rss_update(example_entry, 1, 'LowEndTalk - Offers')[0]}",
-        f"样式 2:\n{format_rss_update(example_entry, 2, 'LowEndTalk - Offers')[0]}",
-        f"样式 3:\n{format_rss_update(example_entry, 3, 'LowEndTalk - Offers')[0]}",
-        f"样式 4:\n{format_rss_update(example_entry, 4, 'LowEndTalk - Offers')[0]}",
-        f"样式 5:\n{format_rss_update(example_entry, 5, 'LowEndTalk - Offers')[0]}",
-        f"样式 6:\n{format_rss_update(example_entry, 6, 'LowEndTalk - Offers')[0]}",
-        f"样式 7:\n{format_rss_update(example_entry, 7, 'LowEndTalk - Offers')[0]}",
-        f"样式 8:\n{format_rss_update(example_entry, 8, 'LowEndTalk - Offers')[0]}"
+        f"样式 1:\n{format_rss_update(example_entry, 1, 'ExampleTag')[0]}",
+        f"样式 2:\n{format_rss_update(example_entry, 2, 'ExampleTag')[0]}",
+        f"样式 3:\n{format_rss_update(example_entry, 3, 'ExampleTag')[0]}",
+        f"样式 4:\n{format_rss_update(example_entry, 4, 'ExampleTag')[0]}",
+        f"样式 5:\n{format_rss_update(example_entry, 5, 'ExampleTag')[0]}",
+        f"样式 6:\n{format_rss_update(example_entry, 6, 'ExampleTag')[0]}",
+        f"样式 7:\n{format_rss_update(example_entry, 7, 'ExampleTag')[0]}",
+        f"样式 8:\n{format_rss_update(example_entry, 8, 'ExampleTag')[0]}",
+        f"样式 9:\n{format_rss_update(example_entry, 9, 'ExampleTag')[0]}",
+        f"样式 10:\n{format_rss_update(example_entry, 10, 'ExampleTag')[0]}"
     ]
     await update.message.reply_text(get_text(lang, 'styles_preview', '\n\n'.join(styles)), parse_mode=ParseMode.HTML)
 
@@ -761,6 +831,10 @@ def format_rss_update(entry, style=1, tag=None):
         return f"{tag_display_bold}<b>{title}</b>\n{link}", link
     elif style == 8:
         return f"{tag_display}<b>{title}</b>\n{link}", link
+    elif style == 9:
+        return f"{tag_display_bold}<b>{title}</b>\n<u>{link}</u>", link
+    elif style == 10:
+        return f"{tag_display_bold}\n<b>{title}</b>\n\n<u>{link}</u>", link
     return f"{tag_display}{title}\n{link}", link
 
 async def process_message_queue(context: ContextTypes.DEFAULT_TYPE):
@@ -912,51 +986,84 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_text(lang, 'feedback_thanks'), parse_mode=ParseMode.HTML)
 
 async def get_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"收到 /get_latest 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    chat_id = update.effective_chat.id
-    is_channel = update.effective_chat.type in ['channel', 'supergroup']
-    num_updates = 1 if not context.args else int(context.args[0]) if context.args and context.args[0].isdigit() else None
-    if num_updates is None:
+    args = context.args
+
+    if len(args) < 1 or len(args) > 3:
         await update.message.reply_text(get_text(lang, 'get_latest_prompt'), parse_mode=ParseMode.HTML)
         return
+
+    if args[0].startswith('@'):
+        if len(args) < 2:
+            await update.message.reply_text(get_text(lang, 'get_latest_prompt'), parse_mode=ParseMode.HTML)
+            return
+        channel_name = args[0]
+        url = args[1]
+        num_updates = int(args[2]) if len(args) == 3 and args[2].isdigit() else 1
+        try:
+            channel = await context.bot.get_chat(channel_name)
+            chat_id = channel.id
+            is_channel = True
+        except Exception as e:
+            await update.message.reply_text(get_text(lang, 'error', f"无法获取频道信息: {e}"), parse_mode=ParseMode.HTML)
+            return
+    else:
+        chat_id = update.effective_chat.id
+        is_channel = update.effective_chat.type in ['channel', 'supergroup']
+        url = args[0]
+        num_updates = int(args[1]) if len(args) == 2 and args[1].isdigit() else 1
+
     subscriptions = get_subscriptions(chat_id, is_channel)
     if not subscriptions:
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
         return
+
     settings = get_user_settings(chat_id)
+    found = False
+    for sub_url, _, _, _, filter_keyword, tag in subscriptions:
+        if sub_url == url:
+            found = True
+            break
+    if not found:
+        await update.message.reply_text(get_text(lang, 'not_found'), parse_mode=ParseMode.HTML)
+        return
+
     await update.message.reply_text(get_text(lang, 'latest_updates', num_updates), parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
     updates_found = False
-    for url, _, _, _, filter_keyword, tag in subscriptions:
-        try:
-            content = await fetch_feed_with_playwright(url)
-            if content is None:
-                logger.error(f"无法获取链接 {url} 的内容")
-                continue
+    try:
+        content = await fetch_feed_with_playwright(url)
+        if content is None:
+            logger.error(f"无法获取链接 {url} 的内容")
+            await update.message.reply_text(get_text(lang, 'timeout', url), parse_mode=ParseMode.HTML)
+            return
 
-            feed = feedparser.parse(content)
-            if not feed.entries:
-                logger.info(f"链接 {url} 无条目: {content[:200]}")
-                continue
-            logger.info(f"在 {url} 中找到 {len(feed.entries)} 个条目")
-            for entry in feed.entries[:num_updates]:
-                if filter_keyword:
-                    if filter_keyword.startswith('--tag:'):
-                        target_tag = filter_keyword.replace('--tag:', '')
-                        if tag != target_tag:
-                            continue
-                    else:
-                        if filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
-                            continue
-                formatted_entry, _ = format_rss_update(entry, settings['message_style'], tag=tag)
-                logger.info(f"发送条目，来自 {url}: {formatted_entry[:200]}")
-                await update.message.reply_text(formatted_entry, parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
-                updates_found = True
-        except Exception as e:
-            logger.error(f"获取最新条目失败，链接 {url}: {e}")
+        feed = feedparser.parse(content)
+        if not feed.entries:
+            logger.info(f"链接 {url} 无条目: {content[:200]}")
+            await update.message.reply_text(get_text(lang, 'empty_feed', url), parse_mode=ParseMode.HTML)
+            return
+        logger.info(f"在 {url} 中找到 {len(feed.entries)} 个条目")
+        for entry in feed.entries[:num_updates]:
+            if filter_keyword:
+                if filter_keyword.startswith('--tag:'):
+                    target_tag = filter_keyword.replace('--tag:', '')
+                    if tag != target_tag:
+                        continue
+                else:
+                    if filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
+                        continue
+            formatted_entry, _ = format_rss_update(entry, settings['message_style'], tag=tag)
+            logger.info(f"发送条目，来自 {url}: {formatted_entry[:200]}")
+            await update.message.reply_text(formatted_entry, parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
+            updates_found = True
+    except Exception as e:
+        logger.error(f"获取最新条目失败，链接 {url}: {e}")
+        await update.message.reply_text(get_text(lang, 'error', str(e)), parse_mode=ParseMode.HTML)
     if not updates_found:
-        await update.message.reply_text(get_text(lang, 'no_updates'), parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
+        await update.message.reply_text(get_text(lang, 'no_updates'), parse_mode=ParseMode.HTML)
 
 def main():
     try:
