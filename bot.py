@@ -16,7 +16,7 @@ from asyncio import Semaphore
 from collections import deque
 
 # 限制同时运行的 Playwright 实例
-MAX_CONCURRENT_BROWSERS = 2
+MAX_CONCURRENT_BROWSERS = 1
 semaphore = Semaphore(MAX_CONCURRENT_BROWSERS)
 
 # 批量处理消息的队列
