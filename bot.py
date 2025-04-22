@@ -6,6 +6,7 @@ import asyncio
 import ssl
 import certifi
 import re
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler
 from telegram.ext import filters
@@ -25,12 +26,16 @@ BATCH_SIZE = 10  # 每批处理的消息数量
 BATCH_INTERVAL = 5  # 每批处理间隔（秒）
 
 # 请替换为实际的 Telegram Bot Token 和用户 ID
-TOKEN = 'Telegram Bot Token'
-AUTHORIZED_USERS = ['用户 ID1', '用户 ID2']
+TOKEN = 'bot'
+AUTHORIZED_USERS = ['8111870448', '7554663120']
 
 # 日志设置
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # 过滤 HTTP 请求日志
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -399,7 +404,7 @@ def is_post_sent(chat_id, post_link):
 
 async def is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = str(update.effective_user.id)
-    logger.info(f"检查用户授权，user_id={user_id}")
+    logger.debug(f"检查用户 {user_id} 授权")
     if user_id not in AUTHORIZED_USERS:
         await update.message.reply_text(get_text(detect_language(update), 'error', '你未被授权'), parse_mode=ParseMode.HTML)
         return False
@@ -419,7 +424,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    logger.info(f"开始订阅流程，chat_id={update.effective_chat.id}")
+    logger.info(f"用户 {update.effective_user.id} 开始订阅，聊天 {update.effective_chat.id}")
     await update.message.reply_text(get_text(lang, 'subscribe_prompt'), parse_mode=ParseMode.HTML)
     context.user_data['chat_id'] = update.effective_chat.id
     return WAITING_URL
@@ -437,11 +442,11 @@ async def fetch_feed_with_playwright(url):
                     content = await page.content()
                     await browser.close()
                     if "<rss" not in content and "<feed" not in content:
-                        logger.warning(f"链接 {url} 返回的内容不像是 RSS: {content[:200]}")
+                        logger.warning(f"链接 {url} 内容非 RSS")
                         return None
                     return content
             except Exception as e:
-                logger.error(f"Playwright 错误，链接 {url}: {e}")
+                logger.error(f"获取链接 {url} 失败: {e}")
                 if attempt == retries - 1:
                     return None
                 await asyncio.sleep(2 ** attempt)
@@ -472,10 +477,10 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         feed = feedparser.parse(content)
         if not feed.entries:
-            logger.warning(f"链接 {url} 无条目。Feed 结构: {feed}")
+            logger.warning(f"链接 {url} 无条目")
             await update.message.reply_text(get_text(lang, 'empty_feed', url), parse_mode=ParseMode.HTML)
         else:
-            logger.info(f"在 {url} 中找到 {len(feed.entries)} 个条目")
+            logger.info(f"链接 {url} 包含 {len(feed.entries)} 条目")
             add_subscription(chat_id, is_channel, url, tag=None)
             channel_info = f" for channel {text[0]}" if is_channel else ""
             await update.message.reply_text(get_text(lang, 'subscribed', url, channel_info), parse_mode=ParseMode.HTML)
@@ -487,10 +492,10 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
-    logger.info(f"用户触发取消订阅命令，user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 发起取消订阅")
     subscriptions = get_all_subscriptions()
     if not subscriptions:
-        logger.info("未找到订阅")
+        logger.info("无订阅记录")
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
         return ConversationHandler.END
     
@@ -498,15 +503,15 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for idx, (chat_id, is_channel, url, _, _, _, _, _) in enumerate(subscriptions):
         button_text = f"{chat_id} - {url[:30]}..." if len(url) > 30 else f"{chat_id} - {url}"
         callback_data = f"unsub_{idx}"
-        logger.info(f"按钮 {idx}: text={button_text}, callback_data={callback_data}")
+        logger.debug(f"生成取消订阅按钮 {idx}: {button_text}")
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         await update.message.reply_text(get_text(lang, 'unsubscribe_prompt'), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        logger.info(f"发送取消订阅选项，包含 {len(keyboard)} 个按钮")
+        logger.info(f"发送取消订阅选项 ({len(keyboard)} 个)")
     except BadRequest as e:
-        logger.error(f"无法发送取消订阅消息: {e}")
+        logger.error(f"发送取消订阅选项失败: {e}")
         await update.message.reply_text(get_text(lang, 'error', '无法生成取消订阅选项'), parse_mode=ParseMode.HTML)
     return WAITING_UNSUBSCRIBE
 
@@ -514,24 +519,24 @@ async def handle_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     lang = detect_language(update)
-    logger.info(f"处理取消订阅回调: {query.data}")
+    logger.debug(f"处理取消订阅回调: {query.data}")
     
     try:
         parts = query.data.split('_')
         if len(parts) != 2 or parts[0] != 'unsub':
-            raise ValueError("无效的回调数据格式")
+            raise ValueError("无效回调数据")
         idx = int(parts[1])
         
         subscriptions = get_all_subscriptions()
         if idx < 0 or idx >= len(subscriptions):
-            raise ValueError("无效的订阅索引")
+            raise ValueError("无效订阅索引")
         
         chat_id, is_channel, url, _, _, _, _, _ = subscriptions[idx]
         remove_subscription(chat_id, is_channel, url)
-        logger.info(f"取消订阅: chat_id={chat_id}, is_channel={is_channel}, url={url}")
+        logger.info(f"取消订阅: 聊天 {chat_id}, 链接 {url}")
         await query.edit_message_text(get_text(lang, 'unsubscribed', url), parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"handle_unsubscribe 中出错: {e}")
+        logger.error(f"取消订阅失败: {e}")
         await query.edit_message_text(get_text(lang, 'error', str(e)), parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
@@ -553,7 +558,7 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(get_text(lang, 'no_subscription'), parse_mode=ParseMode.HTML)
 
 async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /set_interval 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 设置间隔，聊天 {update.effective_chat.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
@@ -625,7 +630,7 @@ async def resume_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(get_text(lang, 'not_found'), parse_mode=ParseMode.HTML)
 
 async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /set_filter 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 设置过滤器，聊天 {update.effective_chat.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
@@ -673,7 +678,7 @@ async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_text(lang, 'not_found'), parse_mode=ParseMode.HTML)
 
 async def set_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /set_tag 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 设置标签，聊天 {update.effective_chat.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
@@ -714,7 +719,7 @@ async def set_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /set_preview 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 设置预览，聊天 {update.effective_chat.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
@@ -744,7 +749,7 @@ async def set_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_text(lang, 'preview_set', 'on' if preview else 'off'), parse_mode=ParseMode.HTML)
 
 async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /set_style 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 设置样式，聊天 {update.effective_chat.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
@@ -862,7 +867,7 @@ async def process_message_queue(context: ContextTypes.DEFAULT_TYPE):
                 )
                 sent_posts.append((chat_id, post_link, sent_time))
             except Exception as e:
-                logger.error(f"发送消息失败，chat_id={chat_id}: {e}")
+                logger.error(f"发送消息失败，聊天 {chat_id}: {e}")
         
         if sent_posts:
             await batch_save_sent_posts(sent_posts)
@@ -883,18 +888,18 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
             
             for url, interval, paused, last_checked, filter_keyword, tag in subscriptions:
                 if paused:
-                    logger.info(f"跳过暂停的链接: {url}")
+                    logger.debug(f"跳过暂停的链接: {url}")
                     continue
                 current_time = int(time.time())
                 if current_time - last_checked < interval:
-                    logger.info(f"跳过 {url}，未到检查间隔")
+                    logger.debug(f"链接 {url} 未到检查时间")
                     continue
                 
-                logger.info(f"检查链接 {url}，chat_id={chat_id}")
+                logger.info(f"检查链接 {url}，聊天 {chat_id}")
                 try:
                     content = await fetch_feed_with_playwright(url)
                     if content is None:
-                        logger.error(f"无法获取链接 {url} 的内容")
+                        logger.error(f"无法获取链接 {url}")
                         await context.bot.send_message(
                             chat_id,
                             get_text(lang, 'feed_unhealthy', url),
@@ -904,7 +909,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
 
                     feed = feedparser.parse(content)
                     if not feed.entries:
-                        logger.info(f"链接 {url} 无条目: {content[:200]}")
+                        logger.warning(f"链接 {url} 无条目")
                         await context.bot.send_message(
                             chat_id,
                             get_text(lang, 'empty_feed', url),
@@ -918,24 +923,24 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
                         reverse=True
                     )
                     if not entries:
-                        logger.info(f"链接 {url} 无有效时间戳的条目")
+                        logger.debug(f"链接 {url} 无有效时间戳")
                         continue
                     
                     for entry in entries[:10]:
                         post_link = entry.get('link', '#')
                         if not post_link:
-                            logger.warning(f"链接 {url} 的条目无链接: {entry}")
+                            logger.warning(f"链接 {url} 条目缺少链接")
                             continue
                         
                         if filter_keyword:
                             if filter_keyword.startswith('--tag:'):
                                 target_tag = filter_keyword.replace('--tag:', '')
                                 if tag != target_tag:
-                                    logger.info(f"条目被标签过滤，目标标签 '{target_tag}', 当前标签 '{tag}'")
+                                    logger.debug(f"条目被标签过滤: 目标 '{target_tag}', 当前 '{tag}'")
                                     continue
                             else:
                                 if filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
-                                    logger.info(f"条目被过滤，关键字 '{filter_keyword}': {post_link}")
+                                    logger.debug(f"条目被关键字 '{filter_keyword}' 过滤: {post_link}")
                                     continue
                         
                         if not is_post_sent(chat_id, post_link):
@@ -952,7 +957,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
                     updates_to_commit.append((chat_id, is_channel, url, current_time))
                 
                 except Exception as e:
-                    logger.error(f"检查 {url} 时出错: {e}")
+                    logger.error(f"检查链接 {url} 失败: {e}")
                     await context.bot.send_message(
                         chat_id,
                         get_text(lang, 'feed_unhealthy', url),
@@ -966,7 +971,7 @@ async def check_latest_posts(context: ContextTypes.DEFAULT_TYPE):
             await process_message_queue(context)
     
     except Exception as e:
-        logger.error(f"check_latest_posts 中发生意外错误: {e}")
+        logger.error(f"检查最新帖子出错: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update, context):
@@ -982,11 +987,11 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(get_text(lang, 'error', '用法: /feedback text'), parse_mode=ParseMode.HTML)
         return
     feedback_text = ' '.join(context.args)
-    logger.info(f"来自 {update.effective_user.id} 的反馈: {feedback_text}")
+    logger.info(f"用户 {update.effective_user.id} 反馈: {feedback_text}")
     await update.message.reply_text(get_text(lang, 'feedback_thanks'), parse_mode=ParseMode.HTML)
 
 async def get_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /get_latest 命令，chat_id={update.effective_chat.id}, user_id={update.effective_user.id}")
+    logger.info(f"用户 {update.effective_user.id} 获取最新帖子，聊天 {update.effective_chat.id}")
     if not await is_authorized(update, context):
         return
     lang = detect_language(update)
@@ -1036,16 +1041,16 @@ async def get_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         content = await fetch_feed_with_playwright(url)
         if content is None:
-            logger.error(f"无法获取链接 {url} 的内容")
+            logger.error(f"无法获取链接 {url}")
             await update.message.reply_text(get_text(lang, 'timeout', url), parse_mode=ParseMode.HTML)
             return
 
         feed = feedparser.parse(content)
         if not feed.entries:
-            logger.info(f"链接 {url} 无条目: {content[:200]}")
+            logger.warning(f"链接 {url} 无条目")
             await update.message.reply_text(get_text(lang, 'empty_feed', url), parse_mode=ParseMode.HTML)
             return
-        logger.info(f"在 {url} 中找到 {len(feed.entries)} 个条目")
+        logger.info(f"链接 {url} 包含 {len(feed.entries)} 条目")
         for entry in feed.entries[:num_updates]:
             if filter_keyword:
                 if filter_keyword.startswith('--tag:'):
@@ -1056,7 +1061,7 @@ async def get_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if filter_keyword.lower() not in (entry.get('title', '') + entry.get('summary', '')).lower():
                         continue
             formatted_entry, _ = format_rss_update(entry, settings['message_style'], tag=tag)
-            logger.info(f"发送条目，来自 {url}: {formatted_entry[:200]}")
+            logger.info(f"发送条目，链接 {url}")
             await update.message.reply_text(formatted_entry, parse_mode=ParseMode.HTML, disable_web_page_preview=not settings['link_preview'])
             updates_found = True
     except Exception as e:
@@ -1101,12 +1106,13 @@ def main():
         if application.job_queue is None:
             raise RuntimeError("JobQueue 不可用。")
         
-        application.job_queue.run_repeating(check_latest_posts, interval=30, first=0)
-
-        application.run_polling()
+        application.job_queue.run_repeating(check_latest_posts, interval=60, first=0)
+        logger.info("机器人启动成功")
+        # 使用长轮询
+        application.run_polling(timeout=30, poll_interval=5)
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        print(f"Error: An unexpected error occurred: {e}")
+        logger.error(f"机器人启动失败: {e}")
+        print(f"错误: 机器人启动失败: {e}")
         exit(1)
 
 if __name__ == '__main__':
